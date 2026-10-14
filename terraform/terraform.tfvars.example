@@ -1,0 +1,6 @@
+project_id              = "corp-finance-gcp"
+region                  = "europe-west1"
+environment             = "prod"
+container_image         = "europe-west1-docker.pkg.dev/corp-finance-gcp/finance-agents/forecast-agent:v1.0.0"
+cloud_run_max_instances = 50
+cloud_run_concurrency   = 80

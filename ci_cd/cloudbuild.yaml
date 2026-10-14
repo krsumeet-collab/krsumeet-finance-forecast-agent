@@ -1,0 +1,94 @@
+# ==============================================================================
+# Google Cloud Build Pipeline: Autonomous Finance Forecast Swarm
+# Automated Linting, Unit Testing, Evaluation Benchmark Gating & Zero-Downtime Deploy
+# ==============================================================================
+
+steps:
+  # Step 1: Install Dependencies, Lint & Static Type Check
+  - name: 'python:3.11-slim'
+    id: 'lint-and-typecheck'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        pip install --upgrade pip
+        pip install ruff mypy pydantic pyyaml
+        echo "Running Ruff Linter..."
+        ruff check src/ tests/
+        echo "Running Mypy Type Checker..."
+        mypy src/ --ignore-missing-imports
+
+  # Step 2: Run Unit, Integration & Chaos Test Suites with Coverage Gating (>= 80%)
+  - name: 'python:3.11-slim'
+    id: 'unit-and-chaos-tests'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        pip install --upgrade pip
+        pip install fastapi pydantic pydantic-settings uvicorn pytest pytest-cov pytest-asyncio pyyaml httpx
+        echo "Running pytest test suite with coverage enforcement..."
+        pytest tests/ --cov=src --cov-fail-under=80 --cov-report=term-missing
+
+  # Step 3: Run Golden Evaluation Benchmark (assert precision >= 95%, numerical fidelity = 100%)
+  - name: 'python:3.11-slim'
+    id: 'eval-benchmark-gate'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        pip install fastapi pydantic pydantic-settings pyyaml
+        echo "Executing Golden Evaluation benchmark quality gate..."
+        python eval/run_eval.py
+
+  # Step 4: Multi-stage Docker Container Build with UV
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'docker-build'
+    args:
+      - 'build'
+      - '-t'
+      - 'europe-west1-docker.pkg.dev/$PROJECT_ID/finance-agents/forecast-agent:$SHORT_SHA'
+      - '-t'
+      - 'europe-west1-docker.pkg.dev/$PROJECT_ID/finance-agents/forecast-agent:latest'
+      - '-f'
+      - 'ci_cd/Dockerfile'
+      - '.'
+
+  # Step 5: Push Container Image to Google Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    id: 'docker-push'
+    args:
+      - 'push'
+      - 'europe-west1-docker.pkg.dev/$PROJECT_ID/finance-agents/forecast-agent:$SHORT_SHA'
+
+  # Step 6: Zero-Downtime Blue/Green Deploy to Google Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: 'cloud-run-deploy'
+    entrypoint: 'gcloud'
+    args:
+      - 'run'
+      - 'deploy'
+      - 'finance-forecast-agent'
+      - '--image=europe-west1-docker.pkg.dev/$PROJECT_ID/finance-agents/forecast-agent:$SHORT_SHA'
+      - '--region=europe-west1'
+      - '--platform=managed'
+      - '--service-account=sa-fpa-forecast-swarm@$PROJECT_ID.iam.gserviceaccount.com'
+      - '--vpc-connector=fpa-vpc-conn'
+      - '--set-env-vars=ENVIRONMENT=prod,GCP_PROJECT_ID=$PROJECT_ID,BIGQUERY_DATASET=finance_analytics,OTEL_SERVICE_NAME=finance-forecast-agent'
+      - '--concurrency=80'
+      - '--max-instances=50'
+      - '--min-instances=0'
+      - '--cpu=2'
+      - '--memory=4Gi'
+      - '--timeout=300'
+      - '--ingress=internal-and-cloud-load-balancing'
+      - '--tag=prod'
+
+images:
+  - 'europe-west1-docker.pkg.dev/$PROJECT_ID/finance-agents/forecast-agent:$SHORT_SHA'
+  - 'europe-west1-docker.pkg.dev/$PROJECT_ID/finance-agents/forecast-agent:latest'
+
+timeout: '1200s'
+options:
+  logging: CLOUD_LOGGING_ONLY
+  machineType: 'E2_HIGHCPU_8'
